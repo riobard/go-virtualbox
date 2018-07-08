@@ -2,8 +2,11 @@ package virtualbox
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -12,11 +15,12 @@ import (
 type MachineState string
 
 const (
-	Poweroff = MachineState("poweroff")
-	Running  = MachineState("running")
-	Paused   = MachineState("paused")
-	Saved    = MachineState("saved")
-	Aborted  = MachineState("aborted")
+	Poweroff     = MachineState("poweroff")
+	Running      = MachineState("running")
+	Paused       = MachineState("paused")
+	Saved        = MachineState("saved")
+	Aborted      = MachineState("aborted")
+	Inaccessible = MachineState("inaccessible")
 )
 
 type Flag int
@@ -48,6 +52,13 @@ func bool2string(b bool) string {
 	return "off"
 }
 
+func string2bool(s string) bool {
+	if s == "on" {
+		return true
+	}
+	return false
+}
+
 // Test if flag is set. Return "on" or "off".
 func (f Flag) Get(o Flag) string {
 	return bool2string(f&o == o)
@@ -66,6 +77,8 @@ type Machine struct {
 	OSType     string
 	Flag       Flag
 	BootOrder  []string // max 4 slots, each in {none|floppy|dvd|disk|net}
+	NICs       map[int]*NIC
+	Mediums    map[int]*StorageMedium
 }
 
 // Refresh reloads the machine information.
@@ -127,7 +140,8 @@ func (m *Machine) Stop() error {
 	}
 
 	for m.State != Poweroff { // busy wait until the machine is stopped
-		if err := vbm("controlvm", m.Name, "acpipowerbutton"); err != nil {
+		//if err := vbm("controlvm", m.Name, "acpipowerbutton"); err != nil {
+		if err := vbm("controlvm", m.Name, "poweroff"); err != nil {
 			return err
 		}
 		time.Sleep(1 * time.Second)
@@ -191,6 +205,9 @@ func GetMachine(id string) (*Machine, error) {
 	}
 	s := bufio.NewScanner(strings.NewReader(stdout))
 	m := &Machine{}
+	m.NICs = make(map[int]*NIC)
+	m.Mediums = make(map[int]*StorageMedium)
+
 	for s.Scan() {
 		res := reVMInfoLine.FindStringSubmatch(s.Text())
 		if res == nil {
@@ -204,6 +221,10 @@ func GetMachine(id string) (*Machine, error) {
 		if val == "" {
 			val = res[4]
 		}
+
+		/*for k, v := range res {
+			fmt.Printf("%d %s\n", k, v)
+		}*/
 
 		switch key {
 		case "name":
@@ -233,12 +254,168 @@ func GetMachine(id string) (*Machine, error) {
 		case "CfgFile":
 			m.CfgFile = val
 			m.BaseFolder = filepath.Dir(val)
+
+		case "nic1":
+			if n, ok := m.NICs[1]; ok {
+				n.Network = NICNetwork(val)
+			} else {
+				m.NICs[1] = &NIC{}
+				m.NICs[1].Network = NICNetwork(val)
+			}
+		case "nictype1":
+			if n, ok := m.NICs[1]; ok {
+				n.Hardware = NICHardware(val)
+			} else {
+				m.NICs[1] = &NIC{}
+				m.NICs[1].Hardware = NICHardware(val)
+			}
+		case "hostonlyadapter1", "nat-network1", "bridgeadapter1", "intnet1":
+			if n, ok := m.NICs[1]; ok {
+				n.InterfaceName = val
+			} else {
+				m.NICs[1] = &NIC{}
+				m.NICs[1].InterfaceName = val
+			}
+		case "cableconnected1":
+			if n, ok := m.NICs[1]; ok {
+				n.CableConnected = string2bool(val)
+			} else {
+				m.NICs[1] = &NIC{}
+				m.NICs[1].CableConnected = string2bool(val)
+			}
+		case "macaddress1":
+			if n, ok := m.NICs[1]; ok {
+				n.MACAddress = val
+			} else {
+				m.NICs[1] = &NIC{}
+				m.NICs[1].MACAddress = val
+			}
+
+		case "nic2":
+			if n, ok := m.NICs[2]; ok {
+				n.Network = NICNetwork(val)
+			} else {
+				m.NICs[2] = &NIC{}
+				m.NICs[2].Network = NICNetwork(val)
+			}
+		case "nictype2":
+			if n, ok := m.NICs[2]; ok {
+				n.Hardware = NICHardware(val)
+			} else {
+				m.NICs[2] = &NIC{}
+				m.NICs[2].Hardware = NICHardware(val)
+			}
+		case "hostonlyadapter2", "nat-network2", "bridgeadapter2", "intnet2":
+			if n, ok := m.NICs[2]; ok {
+				n.InterfaceName = val
+			} else {
+				m.NICs[2] = &NIC{}
+				m.NICs[2].InterfaceName = val
+			}
+		case "cableconnected2":
+			if n, ok := m.NICs[2]; ok {
+				n.CableConnected = string2bool(val)
+			} else {
+				m.NICs[2] = &NIC{}
+				m.NICs[2].CableConnected = string2bool(val)
+			}
+		case "macaddress2":
+			if n, ok := m.NICs[2]; ok {
+				n.MACAddress = val
+			} else {
+				m.NICs[2] = &NIC{}
+				m.NICs[2].MACAddress = val
+			}
+		case "IDE-0-0":
+			fallthrough
+		case "IDEController-0-0":
+			m.Mediums[0] = &StorageMedium{}
+			if runtime.GOOS == "windows" {
+				m.Mediums[0].Ctl = "IDE"
+			} else {
+				m.Mediums[0].Ctl = "IDEController"
+			}
+			m.Mediums[0].Port = 0
+			m.Mediums[0].Device = 0
+			m.Mediums[0].DriveType = DriveHDD
+		case "IDE-ImageUUID-0-0":
+			fallthrough
+		case "IDEController-ImageUUID-0-0":
+			m.Mediums[0].Hdd, err = GetMediumInfo(val)
+			if err != nil {
+				fmt.Println("GetMediumInfo: ", err.Error())
+			}
+		case "IDE-0-1":
+			fallthrough
+		case "IDEController-0-1":
+			m.Mediums[1] = &StorageMedium{}
+			if runtime.GOOS == "windows" {
+				m.Mediums[1].Ctl = "IDE"
+			} else {
+				m.Mediums[1].Ctl = "IDEController"
+			}
+			m.Mediums[1].Port = 0
+			m.Mediums[1].Device = 1
+			m.Mediums[1].DriveType = DriveHDD
+		case "IDE-ImageUUID-0-1":
+			fallthrough
+		case "IDEController-ImageUUID-0-1":
+			m.Mediums[1].Hdd, err = GetMediumInfo(val)
+			if err != nil {
+				fmt.Println("GetMediumInfo: ", err.Error())
+			}
+		case "IDE-1-0":
+			fallthrough
+		case "IDEController-1-0":
+			m.Mediums[2] = &StorageMedium{}
+			if runtime.GOOS == "windows" {
+				m.Mediums[2].Ctl = "IDE"
+			} else {
+				m.Mediums[2].Ctl = "IDEController"
+			}
+			m.Mediums[2].Port = 1
+			m.Mediums[2].Device = 0
+			m.Mediums[2].DriveType = DriveHDD
+		case "IDE-ImageUUID-1-0":
+			fallthrough
+		case "IDEController-ImageUUID-1-0":
+			m.Mediums[2].Hdd, err = GetMediumInfo(val)
+			if err != nil {
+				fmt.Println("GetMediumInfo: ", err.Error())
+			}
+		case "IDE-1-1":
+			fallthrough
+		case "IDEController-1-1":
+			m.Mediums[3] = &StorageMedium{}
+			if runtime.GOOS == "windows" {
+				m.Mediums[3].Ctl = "IDE"
+			} else {
+				m.Mediums[3].Ctl = "IDEController"
+			}
+			m.Mediums[3].Port = 1
+			m.Mediums[3].Device = 1
+			m.Mediums[3].DriveType = DriveHDD
+		case "IDE-ImageUUID-1-1":
+			fallthrough
+		case "IDEController-ImageUUID-1-1":
+			m.Mediums[3].Hdd, err = GetMediumInfo(val)
+			if err != nil {
+				fmt.Println("GetMediumInfo: ", err.Error())
+			}
 		}
 	}
 	if err := s.Err(); err != nil {
 		return nil, err
 	}
+
 	return m, nil
+}
+
+func ImportMachine(filename string) error {
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		return errors.New("no such file or directory")
+	}
+	return vbm("import", filename)
 }
 
 // ListMachines lists all registered machines.
@@ -254,7 +431,19 @@ func ListMachines() ([]*Machine, error) {
 		if res == nil {
 			continue
 		}
-		m, err := GetMachine(res[1])
+		if res[1] == "<inaccessible>" {
+			em := &Machine{}
+			em.UUID = res[2]
+			em.Name = res[1]
+			em.State = Inaccessible
+			ms = append(ms, em)
+			continue
+		}
+		if len(res) != 3 {
+			continue
+		}
+
+		m, err := GetMachine(res[2]) // res[1] is name, res[2] is uuid, now use uuid
 		if err != nil {
 			return nil, err
 		}
@@ -354,8 +543,16 @@ func (m *Machine) DelNATPF(n int, name string) error {
 	return vbm("controlvm", m.Name, fmt.Sprintf("natpf%d", n), "delete", name)
 }
 
+func (m *Machine) SetFrontend(front string) error {
+	return vbm("modifyvm", m.UUID, "--defaultfrontend", front)
+}
+
 // SetNIC set the n-th NIC.
 func (m *Machine) SetNIC(n int, nic NIC) error {
+	if m.State == Running || m.State == Saved || m.State == Paused {
+		return errors.New("Session has been locked")
+	}
+
 	args := []string{"modifyvm", m.Name,
 		fmt.Sprintf("--nic%d", n), string(nic.Network),
 		fmt.Sprintf("--nictype%d", n), string(nic.Hardware),
@@ -363,9 +560,32 @@ func (m *Machine) SetNIC(n int, nic NIC) error {
 	}
 
 	if nic.Network == "hostonly" {
-		args = append(args, fmt.Sprintf("--hostonlyadapter%d", n), nic.HostonlyAdapter)
+		args = append(args, fmt.Sprintf("--hostonlyadapter%d", n), nic.InterfaceName)
 	}
 	return vbm(args...)
+}
+
+// SetNIC set the n-th NIC.
+func (m *Machine) SetVRdpPort(port int) error {
+	if m.State == Running || m.State == Saved || m.State == Paused {
+		return errors.New("Session has been locked")
+	}
+
+	if port > 0 {
+		cmd := []string{"modifyvm", m.Name,
+			"--vrde", "on"}
+		err := vbm(cmd...)
+		if err != nil {
+			return err
+		}
+
+		cmd = []string{"modifyvm", m.Name,
+			"--vrdeport", strconv.Itoa(port),
+		}
+		return vbm(cmd...)
+	}
+
+	return nil
 }
 
 // AddStorageCtl adds a storage controller with the given name.
@@ -398,4 +618,50 @@ func (m *Machine) AttachStorage(ctlName string, medium StorageMedium) error {
 		"--type", string(medium.DriveType),
 		"--medium", medium.Medium,
 	)
+}
+
+// Property Set
+func (m *Machine) PropertySet(key, val string) error {
+	return guestPropertySet(m.UUID, key, val)
+}
+
+// Property Get
+func (m *Machine) PropertyGet(key string) (string, error) {
+	return guestPropertyGet(m.UUID, key)
+}
+
+// Property Get
+func (m *Machine) PropertyDel(key string) error {
+	return guestPropertyDel(m.UUID, key)
+}
+
+// Property Wait
+func (m *Machine) PropertyWait(key string, timeout int) (string, error) {
+	return guestPropertyWait(m.UUID, key, timeout)
+}
+
+// Property Enumerate
+func (m *Machine) PropertyEnumerate() (map[string]string, error) {
+	return guestPropertyEnumerate(m.UUID)
+}
+
+// MAC Address Set
+func (m *Machine) MACAddressSet(solt int, mac string) error {
+	return modifyMacAddress(m.UUID, solt, mac)
+}
+
+func (m *Machine) Clone(name string) error {
+	if m.State != Poweroff {
+		return errors.New("Machine is not poweroff")
+	}
+
+	_, errstr, err := vbmOutErr("clonevm", m.UUID,
+		"--name", name,
+		"--mode", "all",
+		"--register",
+	)
+	if err != nil {
+		return errors.New(errstr)
+	}
+	return nil
 }
